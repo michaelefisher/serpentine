@@ -9,6 +9,9 @@ Commands are organized by concern:
 
 import fnmatch
 import json
+import os
+import shutil
+import stat
 import threading
 import time
 import webbrowser
@@ -480,6 +483,104 @@ def stats(
     }
 
     click.echo(json.dumps(result, indent=2) if pretty else json.dumps(result))
+
+
+@main.group()
+def hooks() -> None:
+    """Manage Claude Code hooks for serpentine integration."""
+    pass
+
+
+@hooks.command("install")
+@click.argument("path", type=click.Path(exists=True), default=".")
+def hooks_install(path: str) -> None:
+    """Install serpentine hooks into a Claude Code project.
+
+    Copies hook scripts into .claude/hooks/ and registers them in
+    .claude/settings.json so Claude Code automatically refreshes and
+    injects the dependency graph on every prompt.
+
+    PATH is the project root (defaults to current directory).
+
+    Examples:
+        serpentine hooks install
+        serpentine hooks install ./my-project
+    """
+    project_path = Path(path).resolve()
+    claude_dir = project_path / ".claude"
+
+    if not claude_dir.is_dir():
+        click.echo(
+            f"❌ No .claude/ directory found in {project_path}. "
+            "Open the project in Claude Code first to create it.",
+            err=True,
+        )
+        raise SystemExit(1)
+
+    hooks_dir = claude_dir / "hooks"
+    hooks_dir.mkdir(exist_ok=True)
+
+    # Copy template files
+    templates_dir = Path(__file__).parent / "templates" / "hooks"
+    for template_name in ("stop-save-graph.sh", "graph-context-prompt.mjs"):
+        src = templates_dir / template_name
+        dst = hooks_dir / template_name
+        shutil.copy2(src, dst)
+        if template_name.endswith(".sh"):
+            dst.chmod(dst.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        click.echo(f"📄 Copied {template_name} → .claude/hooks/")
+
+    # Merge hook registrations into .claude/settings.json
+    settings_path = claude_dir / "settings.json"
+    settings: dict[str, Any] = {}
+    if settings_path.exists():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    new_hooks: dict[str, list[dict[str, Any]]] = {
+        "Stop": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {"type": "command", "command": ".claude/hooks/stop-save-graph.sh"}
+                ],
+            }
+        ],
+        "UserPromptSubmit": [
+            {
+                "matcher": "",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": "node .claude/hooks/graph-context-prompt.mjs",
+                    }
+                ],
+            }
+        ],
+    }
+
+    existing_hooks: dict[str, list[Any]] = settings.setdefault("hooks", {})
+    for event, entries in new_hooks.items():
+        existing = existing_hooks.setdefault(event, [])
+        for entry in entries:
+            for hook in entry["hooks"]:
+                already = any(
+                    h.get("command") == hook["command"]
+                    for bucket in existing
+                    for h in bucket.get("hooks", [])
+                )
+                if not already:
+                    existing.append(entry)
+
+    settings_path.write_text(json.dumps(settings, indent=2), encoding="utf-8")
+    click.echo("✅ Hook registrations written to .claude/settings.json")
+    click.echo(
+        "\nHooks installed:\n"
+        "  Stop             → .claude/hooks/stop-save-graph.sh\n"
+        "  UserPromptSubmit → .claude/hooks/graph-context-prompt.mjs"
+    )
 
 
 def _flatten_nodes(

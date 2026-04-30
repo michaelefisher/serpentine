@@ -23,6 +23,20 @@ from serpentine.config import Config
 logger = logging.getLogger(__name__)
 
 
+def _strip_cfg_deep(graph: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of graph with all cfg fields removed from nodes."""
+    def strip_node(node: dict[str, Any]) -> dict[str, Any]:
+        result = {k: v for k, v in node.items() if k != "cfg"}
+        if "children" in result:
+            result["children"] = [strip_node(c) for c in result["children"]]
+        return result
+
+    result = dict(graph)
+    if "nodes" in result:
+        result["nodes"] = [strip_node(n) for n in result["nodes"]]
+    return result
+
+
 class GraphStateManager:
     """
     Manages the dependency graph state and coordinates analysis.
@@ -99,6 +113,7 @@ class GraphStateManager:
                     cached_json = cache.load(fp)
                     if cached_json is not None:
                         self._update_state(cached_json)
+                        self._save_claude_snapshot(project_path)
                         logger.info(
                             f"Analysis complete (cached): {self.node_count} nodes, {self.edge_count} edges"
                         )
@@ -123,6 +138,8 @@ class GraphStateManager:
 
                 if changed_files is not None:
                     self._compute_change_status(changed_files)
+
+                self._save_claude_snapshot(project_path)
 
                 logger.info(
                     f"Analysis complete: {self.node_count} nodes, {self.edge_count} edges"
@@ -429,6 +446,20 @@ class GraphStateManager:
                 files.append(file_path)
 
         return sorted(files)
+
+    def _save_claude_snapshot(self, project_path: Path) -> None:
+        """Write a CFG-stripped graph snapshot to .claude/graph.json if that directory exists."""
+        claude_dir = project_path / ".claude"
+        if not claude_dir.is_dir():
+            return
+        try:
+            snapshot = _strip_cfg_deep(self._graph_data)
+            (claude_dir / "graph.json").write_text(
+                json.dumps(snapshot), encoding="utf-8"
+            )
+            logger.info("[snapshot] saved to .claude/graph.json")
+        except Exception as e:
+            logger.warning(f"Snapshot save failed: {e}")
 
     def _update_state(self, graph_json: str) -> None:
         """Update the internal state with new graph data."""
